@@ -1,0 +1,13 @@
+out/
+results/
+*.o
+*.obj
+*.exe
+*.dll
+*.so
+*.dylib
+.oppbuildspec
+.metadata/
+.settings/
+.project
+.cproject
