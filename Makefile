@@ -33,10 +33,11 @@ PROJECTRELATIVE_PATH =
 O = $(PROJECT_OUTPUT_DIR)/$(CONFIGNAME)/$(PROJECTRELATIVE_PATH)
 
 # Object files for local .cc, .msg and .sm files
-OBJS =
+OBJS = $O/PufAuthApp.o $O/PufModule.o $O/PufMessages_m.o
 
 # Message files
-MSGFILES =
+MSGFILES = \
+    PufMessages.msg
 
 # SM files
 SMFILES =

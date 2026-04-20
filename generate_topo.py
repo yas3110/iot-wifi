@@ -1,4 +1,4 @@
-import random, math, json
+import random, math, json, hashlib
 
 # ============================================================
 # VARIABLES GLOBALES — modifie uniquement ici
@@ -10,12 +10,18 @@ AREA_X, AREA_Y   = 1200, 900
 NED_FILE         = "WifiNetwork.ned"
 INI_FILE         = "omnetpp.ini"
 GRAPH_FILE       = "social_graph.json"
+CONFIG_FILE      = "config.xml"
+NB_CRP_SOR       = 1
+NB_CRP_OOR       = 3
+PUF_AUTH_PORT    = 4999
+PUF_START_TIME   = 2
+PUF_INTERVAL     = 10
 # ============================================================
 
 random.seed()
 
 def label(pan_id):
-    return chr(ord('A') + pan_id)
+    return chr(ord("A") + pan_id)
 
 def place_aps(n, area_x, area_y):
     cols = math.ceil(math.sqrt(n))
@@ -34,6 +40,20 @@ def pos_autour(cx, cy, r=120):
     d = random.uniform(40, r)
     return int(cx + d * math.cos(a)), int(cy + d * math.sin(a))
 
+def puf_enroll(node_id, num_crp=5):
+    seed = abs(hash(node_id + "puf_secret")) % (10**9)
+    crp_db = {}
+    for i in range(num_crp):
+        challenge = f"C{i}_{node_id}"
+        response  = hashlib.sha256(
+            f"{challenge}{seed}".encode()
+        ).hexdigest()[:16]
+        crp_db[challenge] = response
+    return crp_db
+
+# ============================================================
+# TOPOLOGIE
+# ============================================================
 ap_positions = place_aps(NB_PAN, AREA_X, AREA_Y)
 
 objets_par_pan = {i: [] for i in range(NB_PAN)}
@@ -50,39 +70,40 @@ for pan_id in range(NB_PAN):
 print(f"  Total : {NB_OBJECTS_TOTAL} objets dans {NB_PAN} PANs")
 
 # ============================================================
-# NED
+# NED — CORRIGE : puf: PufModule present dans IoTNode
 # ============================================================
 icons = {"camera": "block/circle", "phone": "device/cellphone", "watch": "device/clock"}
 ned = []
 ned.append("import inet.networklayer.configurator.ipv4.Ipv4NetworkConfigurator;")
-ned.append("import inet.node.inet.WirelessHost;")
-ned.append("import inet.node.wireless.AccessPoint;")
+ned.append("import inet.node.aodv.AodvRouter;")
 ned.append("import inet.physicallayer.wireless.ieee80211.packetlevel.Ieee80211ScalarRadioMedium;")
+ned.append("")
+ned.append("// Module IoT avec PUF integre")
+ned.append("module IoTNode extends AodvRouter")
+ned.append("{")
+ned.append("    submodules:")
+ned.append("        puf: PufModule {")           # CORRECTION : etait absent
+ned.append('            @display("p=100,200");')
+ned.append("        }")
+ned.append("        pufAuthApp: PufAuthApp {")
+ned.append('            @display("p=100,300");')
+ned.append("        }")
+ned.append("}")
 ned.append("")
 ned.append("network IoTNetwork")
 ned.append("{")
 ned.append("    submodules:")
 ned.append('        configurator: Ipv4NetworkConfigurator { @display("p=50,50"); }')
+ned.append('        radioMedium: Ieee80211ScalarRadioMedium { @display("p=200,50"); }')
 ned.append("")
 for pan_id in range(NB_PAN):
     Lp = label(pan_id)
-    x = ap_positions[pan_id][0]
-    ned.append('        radioMedium' + Lp + ': Ieee80211ScalarRadioMedium { @display("p=' + str(x) + ',50"); }')
-ned.append("")
-for pan_id in range(NB_PAN):
-    Lp = label(pan_id)
-    x, y = ap_positions[pan_id]
-    ned.append('        ap' + Lp + ': AccessPoint { @display("p=' + str(x) + ',' + str(y) + ';i=device/accesspoint"); }')
     for t in TYPES_OBJETS:
         n = comptage[pan_id][t]
         if n > 0:
-            ned.append('        ' + t + Lp + '[' + str(n) + ']: WirelessHost { @display("i=' + icons[t] + '"); }')
-    ned.append("")
-ned.append("    connections:")
-for i in range(NB_PAN):
-    for j in range(i+1, NB_PAN):
-        Li, Lj = label(i), label(j)
-        ned.append('        ap' + Li + '.ethg++ <--> { datarate = 100Mbps; delay = 150ms; } <--> ap' + Lj + '.ethg++;')
+            ned.append(f'        {t}{Lp}[{n}]: IoTNode {{ @display("i={icons[t]}"); }}')
+ned.append("")
+ned.append("    connections allowunconnected:")
 ned.append("}")
 
 with open(NED_FILE, "w") as f:
@@ -95,6 +116,7 @@ L = []
 L.append("[General]")
 L.append("network = IoTNetwork")
 L.append("sim-time-limit = 100s")
+L.append(f"ned-path = ./:/home/ubuntuy/omnetpp-6.0.3/samples/inet4.5/src")
 L.append("")
 L.append("**.constraintAreaMinX = 0m")
 L.append("**.constraintAreaMinY = 0m")
@@ -103,98 +125,207 @@ L.append(f"**.constraintAreaMaxX = {AREA_X}m")
 L.append(f"**.constraintAreaMaxY = {AREA_Y}m")
 L.append("**.constraintAreaMaxZ = 0m")
 L.append("")
-L.append("*.configurator.addStaticRoutes = true")
-L.append("*.configurator.addDefaultRoutes = true")
+L.append("*.configurator.addStaticRoutes = false")
+L.append("*.configurator.addDefaultRoutes = false")
+L.append("*.configurator.addSubnetRoutes = false")
 L.append('*.configurator.config = xmldoc("config.xml")')
 L.append("")
-for pan_id in range(NB_PAN):
-    Lp = label(pan_id)
-    L.append('*.ap' + Lp + '.wlan[*].radio.radioMediumModule = "radioMedium' + Lp + '"')
-    for t in TYPES_OBJETS:
-        if comptage[pan_id][t] > 0:
-            L.append('*.' + t + Lp + '[*].wlan[*].radio.radioMediumModule = "radioMedium' + Lp + '"')
-L.append("")
-for pan_id in range(NB_PAN):
-    Lp = label(pan_id)
-    for t in TYPES_OBJETS:
-        if comptage[pan_id][t] > 0:
-            L.append('*.' + t + Lp + '[*].wlan[*].mgmt.typename = "Ieee80211MgmtSta"')
-            L.append('*.' + t + Lp + '[*].wlan[*].agent.typename = "Ieee80211AgentSta"')
-    L.append('*.ap' + Lp + '.wlan[*].mgmt.typename = "Ieee80211MgmtAp"')
-    L.append('*.ap' + Lp + '.wlan[*].agent.typename = ""')
+L.append('**.wlan[*].radio.radioMediumModule = "radioMedium"')
 L.append("")
 L.append("**.wlan[*].radio.transmitter.power = 20mW")
 L.append("**.wlan[*].bitrate = 11Mbps")
 L.append("")
-for pan_id in range(NB_PAN):
-    Lp = label(pan_id)
-    L.append('*.ap' + Lp + '.mobility.initialX = ' + str(ap_positions[pan_id][0]) + 'm')
-    L.append('*.ap' + Lp + '.mobility.initialY = ' + str(ap_positions[pan_id][1]) + 'm')
-    L.append('*.ap' + Lp + '.mobility.initialZ = 0m')
+L.append("# --- Parametres AODV ---")
+L.append("**.aodv.activeRouteTimeout = 3s")
+L.append("**.aodv.deletePeriod = 5s")
+L.append("**.aodv.helloInterval = 1s")
+L.append("**.aodv.allowedHelloLoss = 2")
+L.append("**.aodv.rreqRetries = 2")
+L.append("**.aodv.rreqRatelimit = 10")
+L.append("**.aodv.ttlStart = 1")
+L.append("**.aodv.ttlIncrement = 2")
+L.append("**.aodv.ttlThreshold = 7")
+L.append("**.aodv.jitterPar = 0.01s")
+L.append("**.aodv.displayBubbles = true")
 L.append("")
+L.append("# --- PUF Auth App ---")
+L.append(f"**.pufAuthApp.authStartTime = {PUF_START_TIME}s")
+L.append(f"**.pufAuthApp.authInterval = {PUF_INTERVAL}s")
+L.append("**.pufAuthApp.cmdenv-log-level = trace")
+L.append("")
+L.append("# --- Positions initiales ---")
 for pan_id in range(NB_PAN):
     Lp = label(pan_id)
     for t in TYPES_OBJETS:
         for i in range(comptage[pan_id][t]):
             x, y = pos_autour(*ap_positions[pan_id])
-            L.append('*.' + t + Lp + '[' + str(i) + '].mobility.initialX = ' + str(x) + 'm')
-            L.append('*.' + t + Lp + '[' + str(i) + '].mobility.initialY = ' + str(y) + 'm')
-            L.append('*.' + t + Lp + '[' + str(i) + '].mobility.initialZ = 0m')
+            L.append(f"*.{t}{Lp}[{i}].mobility.initialX = {x}m")
+            L.append(f"*.{t}{Lp}[{i}].mobility.initialY = {y}m")
+            L.append(f"*.{t}{Lp}[{i}].mobility.initialZ = 0m")
 L.append("")
+L.append("# --- Mobilite ---")
+L.append('**.camera*[*].mobility.typename = "StationaryMobility"')
+L.append('**.watch*[*].mobility.typename = "StationaryMobility"')
+L.append("")
+L.append('**.phone*[*].mobility.typename = "RandomWaypointMobility"')
+L.append("**.phone*[*].mobility.speed = uniform(0.5mps, 2mps)")
+L.append("**.phone*[*].mobility.waitTime = uniform(1s, 5s)")
+L.append("")
+
+# Paires UDP inter-PAN
+paires = []
+used_src = set()
+used_dst = set()
+for pan_src in range(NB_PAN):
+    Lsrc = label(pan_src)
+    if comptage[pan_src]["phone"] > 0:
+        for pan_dst in range(NB_PAN):
+            Ldst = label(pan_dst)
+            if pan_dst != pan_src and comptage[pan_dst]["camera"] > 0:
+                src = f"phone{Lsrc}[0]"
+                dst = f"camera{Ldst}[0]"
+                if src not in used_src and dst not in used_dst:
+                    paires.append((src, dst))
+                    used_src.add(src)
+                    used_dst.add(dst)
+                if len(paires) >= 3:
+                    break
+    if len(paires) >= 3:
+        break
+
+L.append("# --- Applications UDP ---")
+L.append("# startTime=5s : laisse le temps a AODV et au PUF auth")
+PORT = 5000
+for idx, (src, dst) in enumerate(paires):
+    port = PORT + idx
+    L.append(f"*.{src}.numApps = 1")
+    L.append(f'*.{src}.app[0].typename = "UdpBasicApp"')
+    L.append(f'*.{src}.app[0].destAddresses = "{dst}"')
+    L.append(f"*.{src}.app[0].destPort = {port}")
+    L.append(f"*.{src}.app[0].messageLength = 512B")
+    L.append(f"*.{src}.app[0].sendInterval = 2s")
+    L.append(f"*.{src}.app[0].startTime = 5s")
+    L.append(f"*.{dst}.numApps = 1")
+    L.append(f'*.{dst}.app[0].typename = "UdpSink"')
+    L.append(f"*.{dst}.app[0].localPort = {port}")
+    L.append("")
+
+L.append("# --- numApps=0 pour les autres noeuds ---")
+src_set = {p[0] for p in paires}
+dst_set = {p[1] for p in paires}
 for pan_id in range(NB_PAN):
     Lp = label(pan_id)
     for t in TYPES_OBJETS:
-        L.append('*.' + t + Lp + '[*].numApps = 0')
+        for i in range(comptage[pan_id][t]):
+            node = f"{t}{Lp}[{i}]"
+            if node not in src_set and node not in dst_set:
+                L.append(f"*.{node}.numApps = 0")
 
 with open(INI_FILE, "w") as f:
     f.write("\n".join(L))
 
 # ============================================================
+# CONFIG XML
+# ============================================================
+xml_lines = [
+    '<?xml version="1.0" encoding="UTF-8"?>',
+    "<config>",
+    '    <interface hosts="**" address="10.0.x.x" netmask="255.255.0.0"/>',
+    "</config>"
+]
+with open(CONFIG_FILE, "w") as f:
+    f.write("\n".join(xml_lines))
+
+# ============================================================
 # SOCIAL GRAPH
 # ============================================================
-social_graph = {}
-
-# Construction des listes par type (pour OOR)
 objets_par_type = {"camera": [], "phone": [], "watch": []}
 for pan_id in range(NB_PAN):
     Lp = label(pan_id)
     for t in TYPES_OBJETS:
         for i in range(comptage[pan_id][t]):
-            objets_par_type[t].append(t + Lp + '[' + str(i) + ']')
+            objets_par_type[t].append(f"{t}{Lp}[{i}]")
 
-# Construction du graphe
+all_crp_dbs = {}
 for pan_id in range(NB_PAN):
     Lp = label(pan_id)
     for t in TYPES_OBJETS:
         for i in range(comptage[pan_id][t]):
-            name = t + Lp + '[' + str(i) + ']'
+            name = f"{t}{Lp}[{i}]"
+            all_crp_dbs[name] = puf_enroll(name, num_crp=5)
 
-            # SOR : tous les objets du même PAN (sauf soi-même)
+social_graph = {}
+for pan_id in range(NB_PAN):
+    Lp = label(pan_id)
+    for t in TYPES_OBJETS:
+        for i in range(comptage[pan_id][t]):
+            name = f"{t}{Lp}[{i}]"
+
             sor = [
-                t2 + Lp + '[' + str(j) + ']'
+                f"{t2}{Lp}[{j}]"
                 for t2 in TYPES_OBJETS
                 for j in range(comptage[pan_id][t2])
-                if t2 + Lp + '[' + str(j) + ']' != name
+                if f"{t2}{Lp}[{j}]" != name
             ]
+            oor = [
+                obj for obj in objets_par_type[t]
+                if obj != name and Lp not in obj
+            ]
+            relations = {
+                "POR":   f"user{Lp}",
+                "C-LOR": f"maison{Lp}",
+                "SOR":   sor,
+                "OOR":   oor
+            }
+            known_crp_dbs_node = {}
+            for peer in sor + oor:
+                known_crp_dbs_node[peer] = all_crp_dbs[peer]
 
-            # OOR : même type, PANs différents
-            oor = [obj for obj in objets_par_type[t] if obj != name and Lp not in obj]
+            base_trust = round(random.uniform(0.6, 1.0), 2)
+
+            # Fingerprint comportemental — DANS la boucle
+            fingerprint = {
+                "battery":    round(random.uniform(0.6, 1.0), 2),
+                "reputation": round(random.uniform(0.5, 1.0), 2),
+                "services":   random.randint(1, 5),
+                "uptime":     round(random.uniform(0.7, 1.0), 2)
+            }
 
             social_graph[name] = {
-                "owner": "user" + Lp,
-                "type": t,
-                "location": "maison" + Lp,
-                "trust_score": round(random.uniform(0.6, 1.0), 2),
-                "friends": sor + oor,
-                "relations": {
-                    "POR":   "user" + Lp,
-                    "C-LOR": "maison" + Lp,
-                    "SOR":   sor,
-                    "OOR":   oor
-                }
+                "owner":       f"user{Lp}",
+                "type":        t,
+                "location":    f"maison{Lp}",
+                "fingerprint": fingerprint,
+                "puf": {
+                    "enrolled":   True,
+                    "enrolledBy": f"user{Lp}",
+                    "crp_db":     all_crp_dbs[name],
+                    "auth_rules": {
+                        "SOR":     {"level": "light", "nb_crp_required": NB_CRP_SOR},
+                        "OOR":     {"level": "full",  "nb_crp_required": NB_CRP_OOR},
+                        "unknown": {"level": "none",  "nb_crp_required": 0}
+                    }
+                },
+                "known_crp_dbs": known_crp_dbs_node,
+                "trust_score":   base_trust,
+                "trust_update_rules": {
+                    "puf_success":     +0.05,
+                    "puf_failure":     -0.20,
+                    "max":              1.0,
+                    "min":              0.0,
+                    "threshold_block":  0.3
+                },
+                "friends":   sor + oor,
+                "relations": relations
             }
 
 with open(GRAPH_FILE, "w") as f:
     json.dump(social_graph, f, indent=4)
 
-print("OK : " + NED_FILE + ", " + INI_FILE + ", " + GRAPH_FILE + " generés avec OOR !")
+print(f"\nOK : {NED_FILE}, {INI_FILE}, {CONFIG_FILE}, {GRAPH_FILE} generes !")
+print(f"  -> IoTNode = AodvRouter + PufModule + PufAuthApp")
+print(f"  -> {len(paires)} flux UDP inter-PAN :")
+for src, dst in paires:
+    print(f"     {src} -> {dst}")
+print(f"  -> SOR : auth legere ({NB_CRP_SOR} CRP) | OOR : auth complete ({NB_CRP_OOR} CRP)")
+print(f"  -> PUF demarre a t={PUF_START_TIME}s, cycle toutes les {PUF_INTERVAL}s")

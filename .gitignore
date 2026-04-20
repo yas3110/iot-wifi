@@ -1,13 +1,15 @@
+# Binaires compilés
 out/
-results/
-*.o
-*.obj
-*.exe
-*.dll
-*.so
-*.dylib
-.oppbuildspec
-.metadata/
-.settings/
-.project
-.cproject
+iot-wifi
+PufIoT
+
+# Fichiers générés automatiquement par opp_msgtool
+PufMessages_m.cc
+PufMessages_m.h
+
+# Logs
+*.log
+.cmdenv-log
+
+# Fichier JSON volumineux de nlohmann (bibliothèque externe)
+json.hpp

@@ -1,8 +1,4 @@
+<?xml version="1.0" encoding="UTF-8"?>
 <config>
-    <interface hosts="cameraA[*] phoneA[*] watchA[*]" address="10.0.1.x" netmask="255.255.255.0"/>
-    <interface hosts="apA" address="10.0.1.1" netmask="255.255.255.0"/>
-    <interface hosts="cameraB[*] phoneB[*] watchB[*]" address="10.0.2.x" netmask="255.255.255.0"/>
-    <interface hosts="apB" address="10.0.2.1" netmask="255.255.255.0"/>
-    <route hosts="cameraA[*] watchA[*] phoneA[*]" destination="10.0.2.0" netmask="255.255.255.0" gateway="10.0.1.1"/>
-    <route hosts="cameraB[*] watchB[*] phoneB[*]" destination="10.0.1.0" netmask="255.255.255.0" gateway="10.0.2.1"/>
+    <interface hosts="**" address="10.0.x.x" netmask="255.255.0.0"/>
 </config>
