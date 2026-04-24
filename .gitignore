@@ -1,16 +1,21 @@
-# Binaires compilés
-out/
-iot-wifi
-PufIoT
+# Résultats de simulation
+results/
 
-# Fichiers générés automatiquement par opp_msgtool
-PufMessages_m.cc
-PufMessages_m.h
+# Fichiers de sauvegarde éditeur
+*.save
+*.save.*
+*.bak
+
+# Fichiers Eclipse/OMNeT++ IDE
+.cproject
+.oppbuildspec
+.project
+.settings/
+
+# Fichiers compilés
+out/
+*.o
+*.so
 
 # Logs
 *.log
-.cmdenv-log
-
-# Fichier JSON volumineux de nlohmann (bibliothèque externe)
-json.hpp
-iot-wifi
