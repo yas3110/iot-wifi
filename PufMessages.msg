@@ -40,3 +40,37 @@ message DarpaRound4
     string targetId;
     string tokenB;            // tok_B = MAC(K_AB, N_B||N_A||id_B)
 }
+
+// ================================================================
+// ÉVOLUTION 2 : Messages d'enrôlement Ad Hoc (sans TTP)
+// ================================================================
+
+// EnrollRequest : A → B  (A inconnu de B, initie l'enrôlement)
+// A envoie sa clé publique DH éphémère
+message EnrollRequest
+{
+    string senderId;      // identifiant de A
+    string targetId;      // identifiant de B
+    string dhPublic;      // pub_A = SHA256(priv_A || "DH_PUB" || targetId)
+    string serviceCard;   // fingerprint de A (pour décision d'acceptation)
+}
+
+// EnrollReply : B → A  (B accepte et envoie sa clé publique DH + premier CRP)
+message EnrollReply
+{
+    string senderId;          // identifiant de B
+    string targetId;          // identifiant de A
+    string dhPublic;          // pub_B
+    string serviceCard;       // fingerprint de B
+    string initialChallenge;  // C_0 : premier challenge de la chaîne (pour le PUF de A)
+    string initialResponse;   // R_0 : réponse attendue (chiffrée avec secret partagé)
+}
+
+// EnrollConfirm : A → B  (A confirme la réception et prouve son PUF)
+message EnrollConfirm
+{
+    string senderId;      // identifiant de A
+    string targetId;      // identifiant de B
+    string pufProof;      // PUF_A(initialChallenge) — prouve l'identité physique de A
+    string mac;           // MAC(sharedSecret, senderId||targetId||pufProof)
+}

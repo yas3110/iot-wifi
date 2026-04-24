@@ -14,8 +14,10 @@ CONFIG_FILE      = "config.xml"
 NB_CRP_SOR       = 1
 NB_CRP_OOR       = 3
 PUF_AUTH_PORT    = 4999
-PUF_START_TIME   = 2
-PUF_INTERVAL     = 10
+# Démarre après convergence AODV (~8s) pour éviter les échecs réseau
+PUF_START_TIME   = 8
+# Intervalle réduit à 2s pour plus de cycles d'auth et d'enrôlement
+PUF_INTERVAL     = 2
 # ============================================================
 
 random.seed()
@@ -41,15 +43,25 @@ def pos_autour(cx, cy, r=120):
     return int(cx + d * math.cos(a)), int(cy + d * math.sin(a))
 
 def puf_enroll(node_id, num_crp=5):
-    seed = abs(hash(node_id + "puf_secret")) % (10**9)
+    puf_seed = abs(hash(node_id + "puf_secret")) % (10**9)
+    seed_challenge = hashlib.sha256(
+        f"{node_id}{puf_seed}OWN_SEED".encode()
+    ).hexdigest()
+
     crp_db = {}
+    current = seed_challenge
     for i in range(num_crp):
-        challenge = f"C{i}_{node_id}"
-        response  = hashlib.sha256(
-            f"{challenge}{seed}".encode()
+        response = hashlib.sha256(
+            f"{current}{puf_seed}PUF_RESPONSE".encode()
         ).hexdigest()[:16]
-        crp_db[challenge] = response
-    return crp_db
+        crp_db[current] = response
+        current = hashlib.sha256(f"{current}DERIVE".encode()).hexdigest()
+
+    return {
+        "seed_challenge": seed_challenge,
+        "seed_response":  crp_db[seed_challenge],
+        "crp_db":         crp_db
+    }
 
 # ============================================================
 # TOPOLOGIE
@@ -70,7 +82,7 @@ for pan_id in range(NB_PAN):
 print(f"  Total : {NB_OBJECTS_TOTAL} objets dans {NB_PAN} PANs")
 
 # ============================================================
-# NED — CORRIGE : puf: PufModule present dans IoTNode
+# NED
 # ============================================================
 icons = {"camera": "block/circle", "phone": "device/cellphone", "watch": "device/clock"}
 ned = []
@@ -82,7 +94,7 @@ ned.append("// Module IoT avec PUF integre")
 ned.append("module IoTNode extends AodvRouter")
 ned.append("{")
 ned.append("    submodules:")
-ned.append("        puf: PufModule {")           # CORRECTION : etait absent
+ned.append("        puf: PufModule {")
 ned.append('            @display("p=100,200");')
 ned.append("        }")
 ned.append("        pufAuthApp: PufAuthApp {")
@@ -135,17 +147,21 @@ L.append("")
 L.append("**.wlan[*].radio.transmitter.power = 20mW")
 L.append("**.wlan[*].bitrate = 11Mbps")
 L.append("")
-L.append("# --- Parametres AODV ---")
+L.append("# --- Parametres AODV — convergence rapide ---")
 L.append("**.aodv.activeRouteTimeout = 3s")
 L.append("**.aodv.deletePeriod = 5s")
-L.append("**.aodv.helloInterval = 1s")
+# helloInterval réduit pour découvrir les voisins plus vite
+L.append("**.aodv.helloInterval = 0.5s")
 L.append("**.aodv.allowedHelloLoss = 2")
-L.append("**.aodv.rreqRetries = 2")
+# Plus de tentatives RREQ pour trouver les routes longues
+L.append("**.aodv.rreqRetries = 3")
 L.append("**.aodv.rreqRatelimit = 10")
-L.append("**.aodv.ttlStart = 1")
+# TTL plus grand dès le départ pour couvrir les nœuds distants
+L.append("**.aodv.ttlStart = 2")
 L.append("**.aodv.ttlIncrement = 2")
 L.append("**.aodv.ttlThreshold = 7")
-L.append("**.aodv.jitterPar = 0.01s")
+# Jitter réduit pour des échanges plus réactifs
+L.append("**.aodv.jitterPar = 0.005s")
 L.append("**.aodv.displayBubbles = true")
 L.append("")
 L.append("# --- PUF Auth App ---")
@@ -194,7 +210,8 @@ for pan_src in range(NB_PAN):
         break
 
 L.append("# --- Applications UDP ---")
-L.append("# startTime=5s : laisse le temps a AODV et au PUF auth")
+# startTime=10s : après convergence AODV et premier cycle PUF auth
+L.append("# startTime=10s : apres convergence AODV et premier cycle PUF auth")
 PORT = 5000
 for idx, (src, dst) in enumerate(paires):
     port = PORT + idx
@@ -204,7 +221,7 @@ for idx, (src, dst) in enumerate(paires):
     L.append(f"*.{src}.app[0].destPort = {port}")
     L.append(f"*.{src}.app[0].messageLength = 512B")
     L.append(f"*.{src}.app[0].sendInterval = 2s")
-    L.append(f"*.{src}.app[0].startTime = 5s")
+    L.append(f"*.{src}.app[0].startTime = 10s")
     L.append(f"*.{dst}.numApps = 1")
     L.append(f'*.{dst}.app[0].typename = "UdpSink"')
     L.append(f"*.{dst}.app[0].localPort = {port}")
@@ -246,13 +263,13 @@ for pan_id in range(NB_PAN):
         for i in range(comptage[pan_id][t]):
             objets_par_type[t].append(f"{t}{Lp}[{i}]")
 
-all_crp_dbs = {}
+all_enroll_data = {}
 for pan_id in range(NB_PAN):
     Lp = label(pan_id)
     for t in TYPES_OBJETS:
         for i in range(comptage[pan_id][t]):
             name = f"{t}{Lp}[{i}]"
-            all_crp_dbs[name] = puf_enroll(name, num_crp=5)
+            all_enroll_data[name] = puf_enroll(name, num_crp=15)
 
 social_graph = {}
 for pan_id in range(NB_PAN):
@@ -277,13 +294,11 @@ for pan_id in range(NB_PAN):
                 "SOR":   sor,
                 "OOR":   oor
             }
-            known_crp_dbs_node = {}
-            for peer in sor + oor:
-                known_crp_dbs_node[peer] = all_crp_dbs[peer]
 
-            base_trust = round(random.uniform(0.6, 1.0), 2)
+            # Trust initial élevé (0.7-1.0) pour éviter les blocages prématurés
+            # pendant la phase de convergence AODV
+            base_trust = round(random.uniform(0.7, 1.0), 2)
 
-            # Fingerprint comportemental — DANS la boucle
             fingerprint = {
                 "battery":    round(random.uniform(0.6, 1.0), 2),
                 "reputation": round(random.uniform(0.5, 1.0), 2),
@@ -291,29 +306,46 @@ for pan_id in range(NB_PAN):
                 "uptime":     round(random.uniform(0.7, 1.0), 2)
             }
 
+            my_enroll = all_enroll_data[name]
+
+            known_crp_dbs_node = {}
+            for peer in sor + oor:
+                peer_enroll = all_enroll_data[peer]
+                known_crp_dbs_node[peer] = {
+                    "seed_challenge": peer_enroll["seed_challenge"],
+                    "seed_response":  peer_enroll["seed_response"],
+                    "crp_db": peer_enroll["crp_db"]
+                }
+
             social_graph[name] = {
                 "owner":       f"user{Lp}",
                 "type":        t,
                 "location":    f"maison{Lp}",
                 "fingerprint": fingerprint,
                 "puf": {
-                    "enrolled":   True,
-                    "enrolledBy": f"user{Lp}",
-                    "crp_db":     all_crp_dbs[name],
+                    "enrolled":        True,
+                    "enrolledBy":      f"user{Lp}",
+                    "seed_challenge":  my_enroll["seed_challenge"],
+                    "seed_response":   my_enroll["seed_response"],
+                    "crp_db":          my_enroll["crp_db"],
                     "auth_rules": {
                         "SOR":     {"level": "light", "nb_crp_required": NB_CRP_SOR},
                         "OOR":     {"level": "full",  "nb_crp_required": NB_CRP_OOR},
+                        "AD_HOC":  {"level": "medium","nb_crp_required": 2},
                         "unknown": {"level": "none",  "nb_crp_required": 0}
                     }
                 },
                 "known_crp_dbs": known_crp_dbs_node,
                 "trust_score":   base_trust,
+                # Règles de mise à jour du trust :
+                # - seuil de blocage abaissé à 0.2 pour tolérer plus d'échecs AODV
+                # - pénalité réduite à -0.10 (au lieu de -0.20)
                 "trust_update_rules": {
                     "puf_success":     +0.05,
-                    "puf_failure":     -0.20,
+                    "puf_failure":     -0.10,
                     "max":              1.0,
                     "min":              0.0,
-                    "threshold_block":  0.3
+                    "threshold_block":  0.2
                 },
                 "friends":   sor + oor,
                 "relations": relations
@@ -329,3 +361,5 @@ for src, dst in paires:
     print(f"     {src} -> {dst}")
 print(f"  -> SOR : auth legere ({NB_CRP_SOR} CRP) | OOR : auth complete ({NB_CRP_OOR} CRP)")
 print(f"  -> PUF demarre a t={PUF_START_TIME}s, cycle toutes les {PUF_INTERVAL}s")
+print(f"  -> AODV helloInterval=0.5s, rreqRetries=3, ttlStart=2")
+print(f"  -> Trust initial: 0.7-1.0, penalite: -0.10, seuil blocage: 0.2")
