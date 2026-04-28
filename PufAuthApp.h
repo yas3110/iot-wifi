@@ -32,7 +32,7 @@ struct DarpaSession {
 class PufAuthApp : public cSimpleModule
 {
   private:
-    PufModule*  puf;
+    PufModule* puf;
     std::string myId;
 
     std::map<std::string, DarpaSession> sessions;
@@ -40,7 +40,7 @@ class PufAuthApp : public cSimpleModule
     std::map<std::string, std::string>  sessionKeys;
     std::set<std::string>               pendingEnrollments;
 
-    cMessage*   authTimer;
+    cMessage* authTimer;
     double      authInterval;
     int nbSuccess  = 0;
     int nbFailed   = 0;

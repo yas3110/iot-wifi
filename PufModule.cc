@@ -138,7 +138,6 @@ void PufModule::initChainForPeer(const std::string& peerId,
 {
     CrpChain chain;
     chain.currentChallenge = seedChallenge;
-    // Priorité à la DB Python si disponible, sinon on prend seedResponse
     auto dbIt = known_crp_dbs.find(peerId);
     if (dbIt != known_crp_dbs.end() && dbIt->second.count(seedChallenge))
         chain.expectedResponse = dbIt->second.at(seedChallenge);
@@ -177,23 +176,17 @@ std::string PufModule::getExpectedResponse(const std::string& peerId)
 std::string PufModule::verifyGetResponse(const std::string& peerId,
                                           const std::string& challenge)
 {
-    // Toujours lire depuis la DB Python — source de vérité unique.
     auto dbIt = known_crp_dbs.find(peerId);
     if (dbIt != known_crp_dbs.end()) {
         auto r = dbIt->second.find(challenge);
         if (r != dbIt->second.end()) return r->second;
-        EV_WARN << "[PUF] verifyGetResponse: challenge inconnu pour " << peerId
-                << " : " << challenge.substr(0,8) << "..." << endl;
     }
-    // Fallback sur la chaîne locale si pas de DB
     auto it = peerChains.find(peerId);
     if (it != peerChains.end())
         return it->second.expectedResponse;
     return "";
 }
 
-// verifyAndAdvanceChain : UNIQUEMENT vérification, sans avancer la chaîne.
-// L'avance est faite explicitement via advancePeerChain().
 bool PufModule::verifyAndAdvanceChain(const std::string& peerId,
                                        const std::string& response)
 {
@@ -202,28 +195,19 @@ bool PufModule::verifyAndAdvanceChain(const std::string& peerId,
     return (it->second.expectedResponse == response);
 }
 
-// advancePeerChain : avance la copie locale de la chaîne d'un peer.
-// Appelé UNIQUEMENT par l'initiateur (A) dans authSuccess,
-// après que les 4 rounds sont complétés avec succès.
 void PufModule::advancePeerChain(const std::string& peerId)
 {
     auto it = peerChains.find(peerId);
     if (it == peerChains.end()) return;
     CrpChain& chain = it->second;
 
-    // Avance vers le challenge suivant dans la DB Python.
-    // Python dérive : C_{n+1} = sha256(C_n + "DERIVE")
-    // On vérifie que C_{n+1} existe dans known_crp_dbs avant d'avancer.
     std::string nextCh = deriveNextChallenge(chain.currentChallenge);
     auto dbIt = known_crp_dbs.find(peerId);
     if (dbIt != known_crp_dbs.end() && dbIt->second.count(nextCh)) {
         chain.currentChallenge = nextCh;
         chain.expectedResponse = dbIt->second.at(nextCh);
         chain.usageCount++;
-        EV << "[PUF-CHAIN] avance " << peerId << " -> C_" << chain.usageCount
-           << "=" << nextCh.substr(0,8) << "..." << endl;
     } else {
-        // DB épuisée — on reste sur le challenge courant (cycle)
         EV_WARN << "[PUF-CHAIN] DB épuisée pour " << peerId << ", reste sur C_"
                 << chain.usageCount << endl;
     }
@@ -235,7 +219,7 @@ void PufModule::advanceOwnChain()
 }
 
 // ---------------------------------------------------------------
-// ENROLMENT AD HOC
+// ENROLMENT AD HOC (CORRIGÉ !)
 // ---------------------------------------------------------------
 std::string PufModule::computeSharedSecret(const std::string& pubA,
                                             const std::string& pubB)
@@ -264,13 +248,24 @@ std::string PufModule::replyEnroll(const std::string& peerId,
     s.iAmInitiator = false;
     s.myDhPrivate  = generateNonce();
     s.myDhPublic   = sha256hex(s.myDhPrivate + "DH_PUB" + peerId);
-    s.sharedSecret     = computeSharedSecret(peerDhPublic, s.myDhPublic);
+    s.sharedSecret = computeSharedSecret(peerDhPublic, s.myDhPublic);
     s.initialChallenge = sha256hex(s.sharedSecret + "INIT_C");
     enrollSessions[peerId] = s;
 
-    std::string initResp = sha256hex(s.initialChallenge + s.sharedSecret + "INIT_R").substr(0, 16);
-    initChainForPeer(peerId, s.initialChallenge, initResp);
+    // FIX : Générer une vraie base de données de secours pour cet inconnu
+    std::map<std::string, std::string> adHocDb;
+    std::string currC = s.initialChallenge;
+    for (int i = 0; i < 15; i++) {
+        std::string currR = sha256hex(currC + s.sharedSecret + "INIT_R").substr(0, 16);
+        adHocDb[currC] = currR;
+        own_crp_db[currC] = currR; // On sauvegarde pour ne plus échouer lors du Round 1 !
+        currC = deriveNextChallenge(currC);
+    }
+
+    loadPeerCrpDb(peerId, adHocDb);
+    initChainForPeer(peerId, s.initialChallenge, adHocDb[s.initialChallenge]);
     addAdHocPeer(peerId, s.sharedSecret);
+
     return s.myDhPublic;
 }
 
@@ -284,9 +279,21 @@ void PufModule::finalizeEnroll(const std::string& peerId,
     EnrollSession& s = it->second;
     s.sharedSecret     = computeSharedSecret(s.myDhPublic, peerDhPublic);
     s.initialChallenge = sha256hex(s.sharedSecret + "INIT_C");
-    std::string initResp = sha256hex(s.initialChallenge + s.sharedSecret + "INIT_R").substr(0, 16);
-    initChainForPeer(peerId, s.initialChallenge, initResp);
+
+    // FIX : Générer une vraie base de données de secours pour cet inconnu
+    std::map<std::string, std::string> adHocDb;
+    std::string currC = s.initialChallenge;
+    for (int i = 0; i < 15; i++) {
+        std::string currR = sha256hex(currC + s.sharedSecret + "INIT_R").substr(0, 16);
+        adHocDb[currC] = currR;
+        own_crp_db[currC] = currR; // On sauvegarde pour ne plus échouer lors du Round 1 !
+        currC = deriveNextChallenge(currC);
+    }
+
+    loadPeerCrpDb(peerId, adHocDb);
+    initChainForPeer(peerId, s.initialChallenge, adHocDb[s.initialChallenge]);
     addAdHocPeer(peerId, s.sharedSecret);
+
     enrollSessions.erase(peerId);
 }
 
@@ -419,3 +426,4 @@ std::string PufModule::getFingerprint()
        << std::setw(4) << (int)(uptime     * 1000) % 0xFFFF;
     return ss.str();
 }
+

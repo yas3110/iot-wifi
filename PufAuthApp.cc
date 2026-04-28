@@ -1,10 +1,12 @@
 #include "PufAuthApp.h"
 #include <cstdlib>
+#include <vector>
+#include <algorithm>
 
 Define_Module(PufAuthApp);
 
-static constexpr double AODV_CONVERGENCE_TIME = 8.0;
-static constexpr double SESSION_TIMEOUT = 8.0;
+static constexpr double AODV_CONVERGENCE_TIME = 25.0;
+static constexpr double SESSION_TIMEOUT = 15.0;
 
 void PufAuthApp::initialize()
 {
@@ -13,7 +15,8 @@ void PufAuthApp::initialize()
     authInterval  = par("authInterval").doubleValue();
     double startT = par("authStartTime").doubleValue();
     authTimer = new cMessage("authTimer");
-    double jitter = (std::hash<std::string>{}(myId) % 1000) / 1000.0;
+    
+    double jitter = uniform(0.0, 5.0);
     scheduleAt(simTime() + startT + jitter, authTimer);
     EV << "[AUTH] " << myId << " initialise, demarrage a t=" << (startT + jitter) << endl;
 }
@@ -42,10 +45,9 @@ void PufAuthApp::handleMessage(cMessage* msg)
 
     if (msg == authTimer) {
         EV << "[AUTH] " << myId << " cycle t=" << simTime() << endl;
-        scheduleAt(simTime() + authInterval, authTimer);
 
-        // Re-auth : efface les pairs authentifiés sans session active
-        // pour relancer un cycle de re-vérification périodique.
+        scheduleAt(simTime() + authInterval + uniform(-2.0, 2.0), authTimer);
+
         for (auto it = authenticated.begin(); it != authenticated.end(); ) {
             if (!sessions.count(it->first))
                 it = authenticated.erase(it);
@@ -53,14 +55,28 @@ void PufAuthApp::handleMessage(cMessage* msg)
                 ++it;
         }
 
+        std::vector<std::string> candidates;
         for (auto& [peerId, rel] : puf->getRelationMap()) {
             int level = puf->getAuthLevel(peerId);
-            if (level > 0 && !sessions.count(peerId) && !authenticated.count(peerId))
-                startAuth(peerId);
+            if (level > 0 && !sessions.count(peerId) && !authenticated.count(peerId)) {
+                candidates.push_back(peerId);
+            }
         }
 
-        // Enrôlement ad hoc : sélection pseudo-aléatoire pour éviter que
-        // toujours le même nœud soit ciblé en premier
+        if (!candidates.empty()) {
+            for (size_t i = candidates.size() - 1; i > 0; --i) {
+                size_t j = intuniform(0, i);
+                std::swap(candidates[i], candidates[j]);
+            }
+
+            int concurrentAuths = 0;
+            for (const std::string& peerId : candidates) {
+                startAuth(peerId);
+                concurrentAuths++;
+                if (concurrentAuths >= 2) break; 
+            }
+        }
+
         cModule* network = getParentModule()->getParentModule();
         std::vector<std::string> unknowns;
         for (cModule::SubmoduleIterator it(network); !it.end(); ++it) {
@@ -96,24 +112,18 @@ void PufAuthApp::scheduleSessionTimeout(const std::string& peerId)
     scheduleAt(simTime() + SESSION_TIMEOUT, t);
 }
 
-// ---------------------------------------------------------------
-// DARPA AUTH — 4 ROUNDS
-// ---------------------------------------------------------------
 void PufAuthApp::startAuth(const std::string& peerId)
 {
     if (puf->isBlocked(peerId)) return;
+
+    // ANTI-DOUBLON : Ne pas relancer si une session est déjà en cours
+    if (sessions.count(peerId)) return;
+
     if (puf->getAuthLevel(peerId) <= 0) {
         if (!pendingEnrollments.count(peerId))
             initiateEnroll(peerId);
         return;
     }
-
-    // FIX DEADLOCK : on supprime la restriction "myId < peerId".
-    // Les deux côtés peuvent initier. La collision est gérée dans
-    // handleRound1 : le nœud dont myId < senderId garde sa session,
-    // l'autre cède et devient répondeur.
-    // Sans ce fix, cameraA[0] (id le plus petit) ne pouvait jamais
-    // initier → succes=0 pour toute la simulation.
 
     std::string challenge = puf->pickChallenge(peerId);
     if (challenge.empty()) {
@@ -153,20 +163,15 @@ void PufAuthApp::handleRound1(DarpaRound1* msg)
         return;
     }
 
-    // Résolution de collision : si les deux ont initié simultanément,
-    // le nœud dont myId < senderId garde sa session d'initiateur.
-    // L'autre abandonne sa session et devient répondeur.
-    if (sessions.count(senderId) && sessions[senderId].initiator) {
-        if (myId < senderId) {
-            // On est l'initiateur légitime, on ignore ce Round1
-            EV << "[AUTH] " << myId << " collision avec " << senderId
-               << " — on garde notre session d'initiateur" << endl;
+    if (sessions.count(senderId)) {
+        if (sessions[senderId].initiator) {
+            if (myId < senderId) return;
+            sessions.erase(senderId);
+        } else {
+            // ANTI-DOUBLON : C'est un retry Wi-Fi, on a déjà généré notre session répondeur !
+            EV << "[AUTH] Doublon Wi-Fi Round1 ignore pour " << senderId << endl;
             return;
         }
-        // On cède : on efface notre session d'initiateur et on répond
-        EV << "[AUTH] " << myId << " collision avec " << senderId
-           << " — on cede, on devient repondeur" << endl;
-        sessions.erase(senderId);
     }
 
     DarpaSession s;
@@ -213,10 +218,8 @@ void PufAuthApp::handleRound1(DarpaRound1* msg)
 void PufAuthApp::handleRound2(DarpaRound2* msg)
 {
     std::string senderId = msg->getSenderId();
-    if (!sessions.count(senderId)) {
-        EV_WARN << "[AUTH] Round2 sans session de " << senderId << endl;
-        return;
-    }
+    if (!sessions.count(senderId)) return;
+
     auto& s = sessions[senderId];
     s.nonce_B       = msg->getNonce_B();
     s.challenge_iB  = msg->getChallenge();
@@ -256,12 +259,9 @@ void PufAuthApp::handleRound2(DarpaRound2* msg)
 void PufAuthApp::handleRound3(DarpaRound3* msg)
 {
     std::string senderId = msg->getSenderId();
-    if (!sessions.count(senderId)) {
-        EV_WARN << "[AUTH] Round3 sans session de " << senderId << endl;
-        return;
-    }
-    auto& s = sessions[senderId];
+    if (!sessions.count(senderId)) return;
 
+    auto& s = sessions[senderId];
     s.R_iA_trunc = puf->xorDecrypt(s.K_temp, std::string(msg->getEncryptedResponse()));
 
     if (std::string(msg->getProofAB()) != s.R_iB_trunc) {
@@ -280,8 +280,6 @@ void PufAuthApp::handleRound3(DarpaRound3* msg)
         return;
     }
 
-    // B (répondeur) : succès — NE PAS avancer la chaîne ici.
-    // Seul A avance dans authSuccess via handleRound4.
     authSuccess(senderId, s.K_AB);
 
     std::string tokB = puf->computeMAC(s.K_AB, s.nonce_B + s.nonce_A + myId);
@@ -296,10 +294,8 @@ void PufAuthApp::handleRound3(DarpaRound3* msg)
 void PufAuthApp::handleRound4(DarpaRound4* msg)
 {
     std::string senderId = msg->getSenderId();
-    if (!sessions.count(senderId)) {
-        EV_WARN << "[AUTH] Round4 sans session de " << senderId << endl;
-        return;
-    }
+    if (!sessions.count(senderId)) return;
+
     auto& s = sessions[senderId];
     std::string expectedTokB = puf->computeMAC(s.K_AB, s.nonce_B + s.nonce_A + senderId);
     if (std::string(msg->getTokenB()) != expectedTokB) {
@@ -312,35 +308,25 @@ void PufAuthApp::handleRound4(DarpaRound4* msg)
 
 void PufAuthApp::authSuccess(const std::string& peerId, const std::string& kAB)
 {
-    // Seul l'initiateur avance sa copie de la chaîne.
-    // L'initiateur est celui dont la session a initiator=true.
     if (sessions.count(peerId) && sessions[peerId].initiator) {
         puf->advancePeerChain(peerId);
     }
-
     puf->updateTrustScore(peerId, true);
     authenticated[peerId] = true;
     sessionKeys[peerId]   = kAB;
     sessions.erase(peerId);
     nbSuccess++;
-    EV << "[AUTH] OK " << myId << " <-> " << peerId
-       << " trust=" << puf->getTrustScore(peerId)
-       << " K_AB=" << kAB.substr(0,16) << "..." << endl;
 }
 
 void PufAuthApp::authFailed(const std::string& peerId)
 {
-    if (simTime().dbl() > AODV_CONVERGENCE_TIME)
+    if (simTime().dbl() > AODV_CONVERGENCE_TIME) {
         puf->updateTrustScore(peerId, false);
+    }
     sessions.erase(peerId);
     nbFailed++;
-    EV << "[AUTH] ECHEC " << myId << " <-> " << peerId
-       << " trust=" << puf->getTrustScore(peerId) << endl;
 }
 
-// ---------------------------------------------------------------
-// ENRÔLEMENT AD HOC
-// ---------------------------------------------------------------
 void PufAuthApp::initiateEnroll(const std::string& peerId)
 {
     pendingEnrollments.insert(peerId);
@@ -350,12 +336,11 @@ void PufAuthApp::initiateEnroll(const std::string& peerId)
     m->setTargetId(peerId.c_str());
     m->setDhPublic(myDhPub.c_str());
     m->setServiceCard(puf->getFingerprint().c_str());
-    EV << "[ENROLL] " << myId << " EnrollRequest -> " << peerId << endl;
     sendToPeer(m, peerId);
 
     cMessage* t = new cMessage("enrollTimeout");
     t->addPar("peerId") = peerId.c_str();
-    scheduleAt(simTime() + 2.0, t);
+    scheduleAt(simTime() + SESSION_TIMEOUT, t);
 }
 
 void PufAuthApp::handleEnrollRequest(EnrollRequest* msg)
@@ -376,7 +361,6 @@ void PufAuthApp::handleEnrollRequest(EnrollRequest* msg)
     m->setServiceCard(puf->getFingerprint().c_str());
     m->setInitialChallenge(initChallenge.c_str());
     m->setInitialResponse(initResp.c_str());
-    EV << "[ENROLL] " << myId << " EnrollReply -> " << senderId << endl;
     sendToPeer(m, senderId);
 }
 
@@ -399,7 +383,6 @@ void PufAuthApp::handleEnrollReply(EnrollReply* msg)
     m->setTargetId(senderId.c_str());
     m->setPufProof(pufProof.c_str());
     m->setMac(mac.c_str());
-    EV << "[ENROLL] " << myId << " EnrollConfirm -> " << senderId << endl;
     sendToPeer(m, senderId);
     nbEnrolled++;
 }
@@ -412,18 +395,13 @@ void PufAuthApp::handleEnrollConfirm(EnrollConfirm* msg)
 
     if (pufProof == expected) {
         nbEnrolled++;
-        EV << "[ENROLL] CONFIRME " << myId << " <-> " << senderId << endl;
         if (!sessions.count(senderId))
             startAuth(senderId);
     } else {
-        EV_WARN << "[ENROLL] REJET PUF de " << senderId << endl;
         puf->updateTrustScore(senderId, false);
     }
 }
 
-// ---------------------------------------------------------------
-// ROUTING
-// ---------------------------------------------------------------
 void PufAuthApp::sendToPeer(cMessage* msg, const std::string& peerId)
 {
     std::string baseName = peerId;
@@ -438,11 +416,11 @@ void PufAuthApp::sendToPeer(cMessage* msg, const std::string& peerId)
         ? network->getSubmodule(baseName.c_str(), index)
         : network->getSubmodule(baseName.c_str());
 
-    if (!peer) { std::cerr << "[AUTH] PEER INTROUVABLE: " << peerId << std::endl; delete msg; return; }
+    if (!peer) { delete msg; return; }
     cModule* app = peer->getSubmodule("pufAuthApp");
-    if (!app)  { std::cerr << "[AUTH] pufAuthApp INTROUVABLE: " << peerId << std::endl; delete msg; return; }
+    if (!app)  { delete msg; return; }
     cGate* gate = app->gate("directIn");
-    if (!gate) { std::cerr << "[AUTH] gate directIn INTROUVABLE: " << peerId << std::endl; delete msg; return; }
+    if (!gate) { delete msg; return; }
     sendDirect(msg, gate);
 }
 

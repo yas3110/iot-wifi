@@ -3,10 +3,11 @@ import random, math, json, hashlib
 # ============================================================
 # VARIABLES GLOBALES — modifie uniquement ici
 # ============================================================
-NB_PAN           = 10
-NB_OBJECTS_TOTAL = 50
+NB_PAN           = 6
+NB_OBJECTS_TOTAL = 30
 TYPES_OBJETS     = ["camera", "phone", "watch"]
-AREA_X, AREA_Y   = 1200, 900
+# Zone réduite à une taille réaliste pour du Wi-Fi (ex: grand entrepôt / hôpital)
+AREA_X, AREA_Y   = 400, 300 
 NED_FILE         = "WifiNetwork.ned"
 INI_FILE         = "omnetpp.ini"
 GRAPH_FILE       = "social_graph.json"
@@ -14,10 +15,8 @@ CONFIG_FILE      = "config.xml"
 NB_CRP_SOR       = 1
 NB_CRP_OOR       = 3
 PUF_AUTH_PORT    = 4999
-# Démarre après convergence AODV (~8s) pour éviter les échecs réseau
-PUF_START_TIME   = 8
-# Intervalle réduit à 2s pour plus de cycles d'auth et d'enrôlement
-PUF_INTERVAL     = 2
+PUF_START_TIME   = 20
+PUF_INTERVAL     = 15
 # ============================================================
 
 random.seed()
@@ -37,9 +36,10 @@ def place_aps(n, area_x, area_y):
         positions.append((x, y))
     return positions[:n]
 
-def pos_autour(cx, cy, r=120):
+# Rayon réduit (r=60 au lieu de 120) pour que les objets d'un même PAN soient plus proches
+def pos_autour(cx, cy, r=60):
     a = random.uniform(0, 2 * math.pi)
-    d = random.uniform(40, r)
+    d = random.uniform(10, r)
     return int(cx + d * math.cos(a)), int(cy + d * math.sin(a))
 
 def puf_enroll(node_id, num_crp=5):
@@ -127,7 +127,7 @@ with open(NED_FILE, "w") as f:
 L = []
 L.append("[General]")
 L.append("network = IoTNetwork")
-L.append("sim-time-limit = 100s")
+L.append("sim-time-limit = 600s")
 L.append(f"ned-path = ./:/home/ubuntuy/omnetpp-6.0.3/samples/inet4.5/src")
 L.append("")
 L.append("**.constraintAreaMinX = 0m")
@@ -144,23 +144,19 @@ L.append('*.configurator.config = xmldoc("config.xml")')
 L.append("")
 L.append('**.wlan[*].radio.radioMediumModule = "radioMedium"')
 L.append("")
-L.append("**.wlan[*].radio.transmitter.power = 20mW")
+L.append("**.wlan[*].radio.transmitter.power = 100mW")
 L.append("**.wlan[*].bitrate = 11Mbps")
 L.append("")
-L.append("# --- Parametres AODV — convergence rapide ---")
-L.append("**.aodv.activeRouteTimeout = 3s")
-L.append("**.aodv.deletePeriod = 5s")
-# helloInterval réduit pour découvrir les voisins plus vite
-L.append("**.aodv.helloInterval = 0.5s")
+L.append("# --- Parametres AODV ---")
+L.append("**.aodv.activeRouteTimeout = 30s")
+L.append("**.aodv.deletePeriod = 30s")
+L.append("**.aodv.helloInterval = 2s")
 L.append("**.aodv.allowedHelloLoss = 2")
-# Plus de tentatives RREQ pour trouver les routes longues
 L.append("**.aodv.rreqRetries = 3")
 L.append("**.aodv.rreqRatelimit = 10")
-# TTL plus grand dès le départ pour couvrir les nœuds distants
 L.append("**.aodv.ttlStart = 2")
 L.append("**.aodv.ttlIncrement = 2")
 L.append("**.aodv.ttlThreshold = 7")
-# Jitter réduit pour des échanges plus réactifs
 L.append("**.aodv.jitterPar = 0.005s")
 L.append("**.aodv.displayBubbles = true")
 L.append("")
@@ -175,6 +171,9 @@ for pan_id in range(NB_PAN):
     for t in TYPES_OBJETS:
         for i in range(comptage[pan_id][t]):
             x, y = pos_autour(*ap_positions[pan_id])
+            # Petite sécurité pour éviter qu'un noeud sorte de la carte
+            x = max(10, min(x, AREA_X - 10))
+            y = max(10, min(y, AREA_Y - 10))
             L.append(f"*.{t}{Lp}[{i}].mobility.initialX = {x}m")
             L.append(f"*.{t}{Lp}[{i}].mobility.initialY = {y}m")
             L.append(f"*.{t}{Lp}[{i}].mobility.initialZ = 0m")
@@ -210,8 +209,7 @@ for pan_src in range(NB_PAN):
         break
 
 L.append("# --- Applications UDP ---")
-# startTime=10s : après convergence AODV et premier cycle PUF auth
-L.append("# startTime=10s : apres convergence AODV et premier cycle PUF auth")
+L.append("# startTime=40s : apres convergence AODV et les premiers echanges PUF")
 PORT = 5000
 for idx, (src, dst) in enumerate(paires):
     port = PORT + idx
@@ -220,8 +218,9 @@ for idx, (src, dst) in enumerate(paires):
     L.append(f'*.{src}.app[0].destAddresses = "{dst}"')
     L.append(f"*.{src}.app[0].destPort = {port}")
     L.append(f"*.{src}.app[0].messageLength = 512B")
-    L.append(f"*.{src}.app[0].sendInterval = 2s")
-    L.append(f"*.{src}.app[0].startTime = 10s")
+    # CORRECTION ICI : Intervalle très espacé pour ne pas saturer le canal Wi-Fi (20s au lieu de 2s)
+    L.append(f"*.{src}.app[0].sendInterval = 20s") 
+    L.append(f"*.{src}.app[0].startTime = 40s")
     L.append(f"*.{dst}.numApps = 1")
     L.append(f'*.{dst}.app[0].typename = "UdpSink"')
     L.append(f"*.{dst}.app[0].localPort = {port}")
@@ -295,8 +294,6 @@ for pan_id in range(NB_PAN):
                 "OOR":   oor
             }
 
-            # Trust initial élevé (0.7-1.0) pour éviter les blocages prématurés
-            # pendant la phase de convergence AODV
             base_trust = round(random.uniform(0.7, 1.0), 2)
 
             fingerprint = {
@@ -337,9 +334,6 @@ for pan_id in range(NB_PAN):
                 },
                 "known_crp_dbs": known_crp_dbs_node,
                 "trust_score":   base_trust,
-                # Règles de mise à jour du trust :
-                # - seuil de blocage abaissé à 0.2 pour tolérer plus d'échecs AODV
-                # - pénalité réduite à -0.10 (au lieu de -0.20)
                 "trust_update_rules": {
                     "puf_success":     +0.05,
                     "puf_failure":     -0.10,
@@ -355,11 +349,8 @@ with open(GRAPH_FILE, "w") as f:
     json.dump(social_graph, f, indent=4)
 
 print(f"\nOK : {NED_FILE}, {INI_FILE}, {CONFIG_FILE}, {GRAPH_FILE} generes !")
+print(f"  -> Zone reduite a {AREA_X}m x {AREA_Y}m pour un Wi-Fi realiste")
 print(f"  -> IoTNode = AodvRouter + PufModule + PufAuthApp")
-print(f"  -> {len(paires)} flux UDP inter-PAN :")
-for src, dst in paires:
-    print(f"     {src} -> {dst}")
-print(f"  -> SOR : auth legere ({NB_CRP_SOR} CRP) | OOR : auth complete ({NB_CRP_OOR} CRP)")
+print(f"  -> {len(paires)} flux UDP inter-PAN (Trafic reduit a 1 paquet/20s)")
 print(f"  -> PUF demarre a t={PUF_START_TIME}s, cycle toutes les {PUF_INTERVAL}s")
-print(f"  -> AODV helloInterval=0.5s, rreqRetries=3, ttlStart=2")
-print(f"  -> Trust initial: 0.7-1.0, penalite: -0.10, seuil blocage: 0.2")
+print(f"  -> AODV et Wi-Fi configures pour haute densite")
